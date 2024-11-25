@@ -5,5 +5,7 @@ The HiQ-FPAR product file name follows certain naming convention, providing usef
 
 The dataset links are as follows:
 1) https://doi.org/10.5281/zenodo.10683549 (spatial resolution is 5km and temporal resolution is 8 days)
+
 2)https://code.earthengine.google.com/?asset=projects/verselab-398313/assets/HiQ_Fpar/wgs_500m_8d (spatial resolution is 500m and temporal resolution is 8 days)
+
 3)https://code.earthengine.google.com/?asset=projects/verselab-398313/assets/HiQ_Fpar/wgs_5km_8d_Bicubic (spatial resolution is 500m and temporal resolution is 8 days)
