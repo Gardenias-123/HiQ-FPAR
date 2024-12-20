@@ -1,0 +1,175 @@
+/***
+ *@author : Jingrui Wang , Kai Yan , Xinpei Yu
+ *@createDate : 2024/11/07 10:13 
+ *@email : 1300460681@qq.com
+ */
+function Get_STICA_LAI_v1(Year){
+  // ----------------- Raw Data Preparation ------------------
+  // Assume the following variables have been generated in previous steps:
+  // - Lailist: Image collection of LAI data (in temporal order).
+  // - flateenName: List of image names across all time steps, used to select specific images.
+  // - listLength: Total number of images in the temporal sequence.
+  // - landcover: Image collection of LandCover data
+
+
+
+  // ------------------ MQA And TSS Generation ------------------
+  // MQA (Mask Quality Assurance) is created from the quality control images (QCCollection) 
+  // to ensure only high-quality pixels are used.
+  // - QCCollection: Quality control image collection to ensure only high-quality pixels are used.
+  // - TSS_mapping: Combines temporal smoothing to create a stable, integrated dataset(use function computeTSS).
+  // - STD_mapping: Computes standard deviation within a smoothing window to assess variability.
+  // - MQA: Combined with the above variables, the quality of the original MODIS LAI/FPAR data was evaluated.
+  
+  
+  
+   // ------------------ Temporal Smoothing ------------------
+  var half_temLength = 3;  // Temporal window radius (3 time steps forward and backward).
+  var ses_pow = 0.5;  // SES smoothing parameter; the higher the value, the greater the influence of the current time.
+
+  // List to store temporal smoothing weights
+  var paraRightHalf = ee.List([]);
+  for (var hf = 0; hf < half_temLength; hf++) {
+    var para = ee.Number(1 - ses_pow).pow(hf).multiply(ses_pow);  // Calculate smoothing weights
+    paraRightHalf = paraRightHalf.add(para);  // Add to weight list
+  }
+
+  var temporalList = ee.List([]);  // Stores images after temporal smoothing
+  for (var i = 0; i < listLength; i++) {  // listLength is the total length of the temporal sequence
+    // back_count and forward_count represent the available smoothing time steps before and after the current step
+    var back_count = (i + half_temLength > listLength - 1) ? (listLength - i - 1) : half_temLength;
+    var forward_count = i - half_temLength < 0 ? i : half_temLength;
+
+    // paraLeftHalf and paraRightHalf store the forward and backward smoothing weights, respectively
+    var paraLeftHalf = paraRightHalf.slice(0, forward_count).reverse();
+    var smoothingList = paraLeftHalf.cat(paraRightHalf.slice(0, back_count));
+
+    // Generate smoothing coefficient image
+    var smoothImage = ee.Image.constant(ee.Array(smoothingList.getInfo()));
+
+    // List of image names involved in the current smoothing window
+    var invoList = flateenName.slice(i - forward_count, i + back_count + 1);
+    var involveName = invoList.remove(invoList.get(forward_count));  // List of image names excluding the current time step
+
+    // Calculate the smoothed result: compute numerator and denominator separately
+    var numerators = Lailist.select(involveName)
+                     .multiply(MQA.select(involveName))
+                     .multiply(smoothImage)
+                     .reduce(ee.Reducer.sum());
+    var denominators = MQA.select(involveName).multiply(smoothImage).reduce(ee.Reducer.sum());
+    var results = numerators.divide(denominators).rename('Temporal');  // Smoothed result image
+    temporalList = temporalList.add(results);  // Add result image to list
+  }
+  var Temporal = ee.ImageCollection.fromImages(temporalList);  // Final collection of temporally smoothed images
+
+  
+  
+  
+  // ------------------ Spatial Smoothing ------------------
+  var euc_pow = -2;  // Exponent for inverse distance weighting; the more negative, the less influence distant pixels have.
+  var radius = 4;  // Radius of the spatial smoothing window (in pixels)
+  var kernal_diameter = 2 * radius + 1;  // Diameter of the smoothing window
+  var kernal = ee.Kernel.square(radius, 'pixels', false);  // Window kernel
+
+  // eucList is the spatial distance matrix used to build spatial smoothing weights
+  var eucList = [
+    [5.656, 5.000, 4.472, 4.123, 4.000, 4.123, 4.472, 5.000, 5.656],
+    [5.000, 4.242, 3.605, 3.162, 3.000, 3.162, 3.605, 4.242, 5.000],
+    [4.472, 3.605, 2.828, 2.236, 2.000, 2.236, 2.828, 3.605, 4.472],
+    [4.123, 3.162, 2.236, 1.414, 1.000, 1.414, 2.236, 3.162, 4.123],
+    [4.000, 3.000, 2.000, 1.000, 0.000, 1.000, 2.000, 3.000, 4.000],
+    [4.123, 3.162, 2.236, 1.414, 1.000, 1.414, 2.236, 3.162, 4.123],
+    [4.472, 3.605, 2.828, 2.236, 2.000, 2.236, 2.828, 3.605, 4.472],
+    [5.000, 4.242, 3.605, 3.162, 3.000, 3.162, 3.605, 4.242, 5.000],
+    [5.656, 5.000, 4.472, 4.123, 4.000, 4.123, 4.472, 5.000, 5.656]
+    ];
+  
+  // Generate weight matrix by converting distance values to weights
+  var euc_inver = ee.Array(eucList).pow(euc_pow).toList();
+  var list_one = ee.List(euc_inver.get(4)).set(4, 0);  // Set center pixel to 0 to avoid self-influence
+  euc_inver = euc_inver.set(4, list_one);
+
+  var distance = ee.Image(ee.Array(euc_inver));  // Inverse distance weight image
+
+  // Calculate the numerator and denominator for spatial smoothing
+  var numerators_ = Lailist.multiply(distance)
+                   .multiply(MQA)
+                   .convolve(kernal).reduce(ee.Reducer.sum());
+  var denominators_ = distance.multiply(MQA).convolve(kernal).reduce(ee.Reducer.sum());
+  var Spatial = numerators_.divide(denominators_).rename(flateenName);  // Spatial smoothing result
+  
+  
+  
+  // ------------------ Compositing ------------------
+  // Convert the temporal composite collection to a multi-band image for easier access to each time step.
+  Temporal = Temporal.toBands().rename(flateenName);
+  
+  // Initialize a mask and blank image for later use with masked values
+  var image = ee.Image(255);  // Placeholder image with fill value 255
+  var mask = ee.Image.constant(0);  // Binary mask with zeros (no data)
+  var maskedImage = image.updateMask(mask);  // Image with all values masked out
+  
+  // Initialize empty lists for storing results of various composites and TSS calculations
+  var CompositionCol = ee.List([]);  // List to store the final composited images
+  var rawTSSList = ee.List([]);  // List to store TSS (Temporal Smoothing Score) values for raw data
+  var spatialTSSList = ee.List([]);  // List for spatial TSS values
+  var temporalTSSList = ee.List([]);  // List for temporal TSS values
+  
+  // Loop over each time step in the series
+  for (var i = 0; i < listLength; i++) {
+    if (i === 0 || i === (listLength - 1)) {
+      // For the first and last images, compute the average between Spatial and Temporal composites
+      var one = Spatial.select('index_' + (i + 1)).add(Temporal.select('index_' + (i + 1))).divide(2);
+      CompositionCol = CompositionCol.add(one.arrayProject([0]).arrayFlatten([['STICA']]).round());
+      
+      // For boundary cases, add masked images as placeholders for TSS lists
+      rawTSSList = rawTSSList.add(maskedImage);
+      temporalTSSList = temporalTSSList.add(maskedImage);
+      spatialTSSList = spatialTSSList.add(maskedImage);
+    } else {
+      // Calculate TSS for middle images
+      // Compute final composited value for each pixel based on weighted TSS score
+      // Store TSS values in respective lists, scaling by 1000 for precision and rounding
+    }
+  }
+  
+  // Convert final composition list to an ImageCollection and set output data type
+  var STICACollection = ee.ImageCollection.fromImages(CompositionCol);
+  var STICABands = STICACollection.toBands().rename(flateenName).where(mod.select('Lai_500m').toBands().gt(100), mod.select('Lai_500m').toBands()).uint8();
+  
+  // // Add additional information to STICA time series
+  // Loop through each image, adding relevant bands and metadata
+  var LaiQCList = QCCollection.toList(listLength);
+  var STICA_addInfo = ee.List([]);
+  
+  // Create new image for each time step with raw metadata and various calculated bands
+  // .........
+  
+  
+  // Return the final ImageCollection containing STICA with added information
+  return ee.ImageCollection.fromImages(STICA_addInfo);
+}
+
+// // absolute/relative_TSS
+function computeTSS(ima, imBefore, imAfter, index) {
+  var diff = imAfter.subtract(imBefore);
+  var numerators = diff.multiply(index).subtract(ima.multiply(2)).subtract(diff.multiply(index-1)).add(imBefore.multiply(2)).abs();
+  var denominators = diff.multiply(diff).add(4).sqrt();
+  var absolute_TSS = numerators.divide(denominators);
+  var relative_TSS = absolute_TSS.divide(ima).rename('Re_TSS');
+  return relative_TSS;
+}
+
+// Use the reciprocal of the relative TSS as the weight
+function computeTSS_inver(ima, imBefore, imAfter, index) {
+  var diff = imAfter.subtract(imBefore);
+  var numerators = diff.multiply(index).subtract(ima.multiply(2)).subtract(diff.multiply(index-1)).add(imBefore.multiply(2)).abs();
+  var denominators = diff.multiply(diff).add(4).sqrt();
+  var absolute_TSS = numerators.divide(denominators);
+  var relative_TSS = absolute_TSS.divide(ima).rename('Re_TSS');
+  return ee.Image(1).divide(relative_TSS);
+}
+
+
+
+
